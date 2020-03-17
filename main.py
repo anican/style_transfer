@@ -1,90 +1,22 @@
 import argparse
-from models import GoogLeNet
+from io import BytesIO
+from matplotlib import pyplot as plt
 import numpy as np
+from PIL import Image
 from project import Project
+import requests
 import time
 import torch
 from torch import multiprocessing
 from torch import nn
 from torch import optim
-from torch.utils.data import DataLoader
-from torchvision import transforms
-from torchvision import datasets
+from torchvision import transforms, models
 import traceback
 from utils import pt_util
 
 
-def train(model, device, data_loader, optimizer, epoch, log_interval):
-    model.train()
-    losses = []
-    for batch_idx, (data, label) in enumerate(data_loader):
-        data, label = data.to(device), label.to(device)
-        optimizer.zero_grad()
-        output = model(data)
-        loss = model.loss(output, label)
-        losses.append(loss.item())
-        loss.backward()
-        optimizer.step()
-        if batch_idx % log_interval == 0:
-            print('{} Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                time.ctime(time.time()),
-                epoch, batch_idx * len(data), len(data_loader.dataset),
-                100. * batch_idx / len(data_loader), loss.item()))
-    return np.mean(losses)
-
-
-def test(model, device, data_loader, return_images=False, log_interval=None):
-    model.eval()
-    test_loss, correct = 0, 0
-    correct_images, correct_values, error_images, predicted_values, gt_values = [], [], [], [], []
-
-    with torch.no_grad():
-        for batch_idx, (data, label) in enumerate(data_loader):
-            data, label = data.to(device), label.to(device)
-            output = model(data)
-            test_loss_on = model.loss(output, label, reduction='sum').item()
-            test_loss += test_loss_on
-            prediction = output.max(1)[1]
-            correct_mask = prediction.eq(label.view_as(prediction))
-            num_correct = correct_mask.sum().item()
-            correct += num_correct
-            if return_images:
-                if num_correct > 0:
-                    correct_images.append(data[correct_mask, ...].data.cpu().numpy())
-                    correct_value_data = label[correct_mask].data.cpu().numpy()[:, 0]
-                    correct_values.append(correct_value_data)
-                if num_correct < len(label):
-                    error_data = data[~correct_mask, ...].data.cpu().numpy()
-                    error_images.append(error_data)
-                    predicted_value_data = prediction[~correct_mask].data.cpu().numpy()
-                    predicted_values.append(predicted_value_data)
-                    gt_value_data = label[~correct_mask].data.cpu().numpy()[:, 0]
-                    gt_values.append(gt_value_data)
-            if log_interval is not None and batch_idx % log_interval == 0:
-                print('{} Test: [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                    time.ctime(time.time()),
-                    batch_idx * len(data), len(data_loader.dataset),
-                    100. * batch_idx / len(data_loader), test_loss_on))
-    if return_images:
-        correct_images = np.concatenate(correct_images, axis=0)
-        error_images = np.concatenate(error_images, axis=0)
-        predicted_values = np.concatenate(predicted_values, axis=0)
-        correct_values = np.concatenate(correct_values, axis=0)
-        gt_values = np.concatenate(gt_values, axis=0)
-
-    test_loss /= len(data_loader.dataset)
-    test_accuracy = 100. * correct / len(data_loader.dataset)
-
-    print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
-        test_loss, correct, len(data_loader.dataset), test_accuracy))
-    if return_images:
-        return test_loss, test_accuracy, correct_images, correct_values, error_images, predicted_values, gt_values
-    else:
-        return test_loss, test_accuracy
-
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='<Add Project Description>')
+def get_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description='<~Style Transfer!~>')
     parser.add_argument('--batch_size', type=int, default=256)
     parser.add_argument('--test_batch_size', type=int, default=10)
     parser.add_argument('--epochs', type=int, default=200)
@@ -93,71 +25,164 @@ if __name__ == '__main__':
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--print_interval', type=int, default=100)
     parser.add_argument('--seed', type=int, default=0)
-    args = parser.parse_args()
-    project = Project()
+    return parser.parse_args()
 
-    # Data Transforms and Datasets
-    transform_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4), transforms.RandomHorizontalFlip(), transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-    ])
-    transform_test = transforms.Compose([
-        transforms.ToTensor(), transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-    ])
-    data_train = datasets.CIFAR10(root=str(project.DATA_PATH), train=True, download=True, transform=transform_train)
-    data_test = datasets.CIFAR10(root=str(project.DATA_PATH), train=False, download=True, transform=transform_test)
 
-    # Train on GPU (if CUDA is available)
-    # torch.manual_seed(args.seed)
+def load_model() -> nn.Module:
+    """
+    Returns the pre-trained features of deep neural network architecture trained on ImageNet task.
+
+    Arguments:
+        architecture: str, desired architecture (vgg19, resnet101, googlenet, etc.).
+
+    Returns:
+        model: nn.Module, pre-trained model from torchvision of specified architecture
+    """
+    vgg19 = models.vgg19(pretrained=True).features
+    for parameter in vgg19.parameters():
+        parameter.requires_grad = False
+    return vgg19
+
+
+def load_image(img_path, max_size=400, shape=None) -> torch.Tensor:
+    """
+    Converts an image at the specified path to a torch.Tensor object
+
+    Arguments:
+        img_path: str, path to an image. This can either be a valid file path or URL.
+        max_size: int, the maximum permitted size of an image in both the vertical and horizontal
+            dimensions.
+        shape: tuple, specifying the shape of a given image (Optional).
+
+    Returns:
+        (tensor_img, native_img_shape): (torch.Tensor, tuple), image at the specified link in tensor format. Convolutions
+        process tensors in the shape (N=batch_size, N=channels_in, H=image_height, W=image_width) so
+        we return the tensor in this format and the shape of the original PIL image.
+    """
+    if 'http' in img_path:
+        response = requests.get(img_path)
+        image = Image.open(BytesIO(response.content)).convert('RGB')
+    else:
+        image = Image.open(img_path).convert('RGB')
+
+    if max(image.size) > max_size:
+        size = max_size
+    else:
+        size = max(image.size)
+
+    if shape is not None:
+        size = shape
+
+    image_transform = transforms.Compose([
+        transforms.Resize(size),
+        transforms.ToTensor(),
+        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+    ])
+    # shape before torch indexing is (3, H, W)
+    tensor_img = image_transform(image)[:3, :, :].unsqueeze(0)
+    return tensor_img, tensor_img.size()[2:]
+
+
+def to_ndarray(tensor: torch.Tensor) -> np.ndarray:
+    """
+    Convert a torch.Tensor object into an np.ndarray object
+
+    Arguments:
+        tensor: torch.Tensor
+
+    Returns:
+        array: np.ndarray
+    """
+    # make a copy and move it to the cpu
+    array = tensor.clone().to('cpu').detach()
+    # get rid of batch dimension
+    array = array.numpy().squeeze()
+    # restore the original shape of the image, undo channels arrangement
+    array = array.transpose(1, 2, 0)
+    print(array[:, :, 0])
+    array = array * np.array((0.229, 0.224, 0.225)) + np.array((0.484, 0.456, 0.406))
+    print(array[:, :, 0])
+    array = array.clip(0, 1)
+    return array
+
+
+def main():
+    # args = get_args()
+    # model = load_model()
+    # print('VGG19:\n', model)
+
     use_cuda = torch.cuda.is_available()
-    torch_device = torch.device("cuda" if use_cuda else "cpu")
-    print('using device', torch_device)
+    device = torch.device('cuda' if use_cuda else 'cpu')
+    print('Using Device:', device)
+    # model.to(device)
 
-    # Neural Network Model
-    network = GoogLeNet().to(torch_device)
+    content_path = "https://pbs.twimg.com/profile_images/1228153568688918529/au9ifIiK_400x400.jpg"
+    content_img, content_shape = load_image(content_path)
+    print(content_img.size(), content_shape)
+    style_path = "https://www.1st-art-gallery.com/frame-preview/4578922.jpg?sku=Unframed&thumb=0&huge=1"
+    style_img, _ = load_image(style_path, shape=content_shape)
 
-    # Loss Functions TODO:
-    criterion = nn.MSELoss()
+    content_img.to(device)
+    style_img.to(device)
 
-    # Create Optimizer
-    opt = optim.SGD(network.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
+    content_display = to_ndarray(content_img)
+    style_display = to_ndarray(style_img)
 
-    num_workers = multiprocessing.cpu_count()
-    print('Number of CPUs:', num_workers)
-    kwargs = {'num_workers': num_workers, 'pin_memory': True} if use_cuda else {}
-    class_names = ['airplane', 'automobile', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck']
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 10))
+    ax1.imshow(content_display)
+    ax2.imshow(style_display)
 
-    # replace with get_dataloaders() in the template overall
-    train_loader = DataLoader(data_train, batch_size=args.batch_size, shuffle=True, **kwargs)
-    test_loader = DataLoader(data_test, batch_size=args.test_batch_size, **kwargs)
+    plt.show()
 
-    start_epoch = network.load_last_model(str(project.WEIGHTS_PATH))
-    train_losses, test_losses, test_accuracies = pt_util.read_log(str(project.LOG_PATH), ([], [], []))
-    test_loss, test_accuracy = test(network, torch_device, test_loader)
-    test_losses.append((start_epoch, test_loss))
-    test_accuracies.append((start_epoch, test_accuracy))
 
-    try:
-        for epoch in range(start_epoch, args.epochs + 1):
-            train_loss = train(network, torch_device, train_loader, opt, epoch, args.print_interval)
-            test_loss, test_accuracy = test(network, torch_device, test_loader)
-            train_losses.append((epoch, train_loss))
-            test_losses.append((epoch, test_loss))
-            test_accuracies.append((epoch, test_accuracy))
-            pt_util.write_log(str(project.LOG_PATH), (train_losses, test_losses, test_accuracies))
-            network.save_best_model(test_accuracy, str(project.WEIGHTS_PATH) + '/%03d.pt' % epoch)
-    except KeyboardInterrupt as ke:
-        print('Manually interrupted execution...')
-    except:
-        traceback.print_exc()
-    finally:
-        # TODO: Shouldn't this be saved to most recent epoch
-        print('Saving model in its current state')
-        network.save_model(str(project.WEIGHTS_PATH) + '/%03d.pt' % epoch, 0)
-        ep, val = zip(*train_losses)
-        pt_util.plot(ep, val, 'Train loss', 'Epoch', 'Error')
-        ep, val = zip(*test_losses)
-        pt_util.plot(ep, val, 'Test loss', 'Epoch', 'Error')
-        ep, val = zip(*test_accuracies)
-        pt_util.plot(ep, val, 'Test accuracy', 'Epoch', 'Error')
+if __name__ == '__main__':
+    main()
+    # Data Transforms and Datasets
+
+    # # Train on GPU (if CUDA is available)
+    # use_cuda = torch.cuda.is_available()
+    # device = torch.device('cuda' if use_cuda else 'cpu')
+    # print('Using Device', device)
+
+
+    # # Create Optimizer
+    # opt = optim.SGD(network.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
+
+    # num_workers = multiprocessing.cpu_count()
+    # print('Number of CPUs:', num_workers)
+    # kwargs = {'num_workers': num_workers, 'pin_memory': True} if use_cuda else {}
+
+    # # replace with get_dataloaders() in the template overall
+    # train_loader = DataLoader(data_train, batch_size=args.batch_size, shuffle=True, **kwargs)
+    # test_loader = DataLoader(data_test, batch_size=args.test_batch_size, **kwargs)
+
+    # start_epoch = network.load_last_model(str(project.WEIGHTS_PATH))
+    # train_losses, test_losses, test_accuracies = pt_util.read_log(str(project.LOG_PATH), ([], [], []))
+    # test_loss, test_accuracy = test(network, device, test_loader)
+    # test_losses.append((start_epoch, test_loss))
+    # test_accuracies.append((start_epoch, test_accuracy))
+
+    # try:
+        # for epoch in range(start_epoch, args.epochs + 1):
+            # train_loss = train(network, device, train_loader, opt, epoch, args.print_interval)
+            # test_loss, test_accuracy = test(network, device, test_loader)
+            # train_losses.append((epoch, train_loss))
+            # test_losses.append((epoch, test_loss))
+            # test_accuracies.append((epoch, test_accuracy))
+            # pt_util.write_log(str(project.LOG_PATH), (train_losses, test_losses, test_accuracies))
+            # network.save_best_model(test_accuracy, str(project.WEIGHTS_PATH) + '/%03d.pt' % epoch)
+    # except KeyboardInterrupt as ke:
+        # print('Manually interrupted execution...')
+    # except:
+        # traceback.print_exc()
+    # finally:
+        # # TODO: Shouldn't this be saved to most recent epoch
+        # print('Saving model in its current state')
+        # network.save_model(str(project.WEIGHTS_PATH) + '/%03d.pt' % epoch, 0)
+        # ep, val = zip(*train_losses)
+        # pt_util.plot(ep, val, 'Train loss', 'Epoch', 'Error')
+        # ep, val = zip(*test_losses)
+        # pt_util.plot(ep, val, 'Test loss', 'Epoch', 'Error')
+        # ep, val = zip(*test_accuracies)
+        # pt_util.plot(ep, val, 'Test accuracy', 'Epoch', 'Error')
 
