@@ -3,7 +3,7 @@ from io import BytesIO
 from matplotlib import pyplot as plt
 import numpy as np
 from PIL import Image
-from project import Project
+from paths import ProjectPaths
 import requests
 import time
 import torch
@@ -17,14 +17,9 @@ from utils import pt_util
 
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='<~Style Transfer!~>')
-    parser.add_argument('--batch_size', type=int, default=256)
-    parser.add_argument('--test_batch_size', type=int, default=10)
-    parser.add_argument('--epochs', type=int, default=200)
-    parser.add_argument('--lr', type=float, default=0.01)
-    parser.add_argument('--weight_decay', type=float, default=0.0005)
-    parser.add_argument('--momentum', type=float, default=0.9)
-    parser.add_argument('--print_interval', type=int, default=100)
-    parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--iterations', type=int, default=2000)
+    parser.add_argument('--lr', type=float, default=0.003)
+    parser.add_argument('--print_interval', type=int, default=400)
     return parser.parse_args()
 
 
@@ -99,17 +94,50 @@ def to_ndarray(tensor: torch.Tensor) -> np.ndarray:
     array = array.numpy().squeeze()
     # restore the original shape of the image, undo channels arrangement
     array = array.transpose(1, 2, 0)
-    print(array[:, :, 0])
     array = array * np.array((0.229, 0.224, 0.225)) + np.array((0.484, 0.456, 0.406))
-    print(array[:, :, 0])
     array = array.clip(0, 1)
     return array
 
 
+def get_features(model: nn.Module, tensor_img: torch.Tensor) -> dict:
+    layers = {
+        '0': 'conv1_1',
+        '5': 'conv2_1',
+        '10': 'conv3_1',
+        '19': 'conv4_1',
+        '21': 'conv4_2',
+        '28': 'conv5_1'
+    }
+    features = {}
+    x = tensor_img
+    for name, layer in model._modules.items():
+        x = layer(x)
+        if name in layers:
+            features[layers[name]] = x
+    return features
+
+
+def get_gramian(tensor: torch.Tensor) -> torch.Tensor:
+    """
+    <description>
+
+    Arguments:
+        tensor: torch.Tensor,
+
+    Returns:
+        gramian: torch.Tensor,
+    """
+    _, input_channels, height, width = tensor.size()
+    tensor = tensor.view(input_channels, height * width)
+    gramian = tensor @ tensor.T
+    return gramian
+
+
 def main():
-    # args = get_args()
-    # model = load_model()
-    # print('VGG19:\n', model)
+    args = get_args()
+    model = load_model()
+    paths = ProjectPaths()
+    print('VGG19:\n', model)
 
     use_cuda = torch.cuda.is_available()
     device = torch.device('cuda' if use_cuda else 'cpu')
@@ -131,58 +159,62 @@ def main():
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 10))
     ax1.imshow(content_display)
     ax2.imshow(style_display)
+    fig.savefig(str(paths.IMAGES_PATH) + '/default.png')
 
-    plt.show()
+    content_features = get_features(model, content_img)
+    style_features = get_features(model, style_img)
+
+    style_gramians = {layer: get_gramian(style_features[layer]) for layer in style_features}
+
+    target_img = content_img.clone().to(device)
+    target_img.requires_grad = True
+
+    style_weights = {
+        'conv1_1': 1.,
+        'conv2_1': 0.75,
+        'conv3_1': 0.2,
+        'conv4_1': 0.2,
+        'conv5_1': 0.2
+    }
+
+    content_weight = 1  # alpha
+    style_weight = 1e6  # beta
+
+    optimizer = optim.Adam([target_img], lr=args.lr)
+
+    for ii in range(args.iterations + 1):
+        optimizer.zero_grad()
+        target_features = get_features(model, target_img)
+        content_loss = torch.mean((target_features['conv4_2'] - content_features['conv4_2'])**2)
+
+        # TODO: Put this into a method
+        style_loss = 0
+        for layer in style_weights:
+            target_feature = target_features[layer]
+            target_gramian = get_gramian(target_feature)
+            _, input_channels, height, width = target_feature.size()
+            style_gramian = style_gramians[layer]
+            curr_layer_loss = style_weights[layer] * torch.mean((target_gramian - style_gramian)**2)
+            style_loss += curr_layer_loss / (input_channels * height * width)
+        loss = content_weight * content_loss + style_weight * style_loss
+        loss.backward()
+        optimizer.step()
+
+        if ii % args.print_interval == 0:
+            print("Iteration:", ii)
+            print("Loss:", loss.item())
+            curr_path = str(paths.IMAGES_PATH) + '/result_step_%03d.png' % ii
+            plt.imsave(curr_path, to_ndarray(target_img))
+
+    # Show final figure
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 10))
+    ax1.imshow(to_ndarray(content_img))
+    ax2.imshow(to_ndarray(target_img))
+    fig.savefig(str(paths.IMAGES_PATH) + '/final.png')
+
+
 
 
 if __name__ == '__main__':
     main()
-    # Data Transforms and Datasets
-
-    # # Train on GPU (if CUDA is available)
-    # use_cuda = torch.cuda.is_available()
-    # device = torch.device('cuda' if use_cuda else 'cpu')
-    # print('Using Device', device)
-
-
-    # # Create Optimizer
-    # opt = optim.SGD(network.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
-
-    # num_workers = multiprocessing.cpu_count()
-    # print('Number of CPUs:', num_workers)
-    # kwargs = {'num_workers': num_workers, 'pin_memory': True} if use_cuda else {}
-
-    # # replace with get_dataloaders() in the template overall
-    # train_loader = DataLoader(data_train, batch_size=args.batch_size, shuffle=True, **kwargs)
-    # test_loader = DataLoader(data_test, batch_size=args.test_batch_size, **kwargs)
-
-    # start_epoch = network.load_last_model(str(project.WEIGHTS_PATH))
-    # train_losses, test_losses, test_accuracies = pt_util.read_log(str(project.LOG_PATH), ([], [], []))
-    # test_loss, test_accuracy = test(network, device, test_loader)
-    # test_losses.append((start_epoch, test_loss))
-    # test_accuracies.append((start_epoch, test_accuracy))
-
-    # try:
-        # for epoch in range(start_epoch, args.epochs + 1):
-            # train_loss = train(network, device, train_loader, opt, epoch, args.print_interval)
-            # test_loss, test_accuracy = test(network, device, test_loader)
-            # train_losses.append((epoch, train_loss))
-            # test_losses.append((epoch, test_loss))
-            # test_accuracies.append((epoch, test_accuracy))
-            # pt_util.write_log(str(project.LOG_PATH), (train_losses, test_losses, test_accuracies))
-            # network.save_best_model(test_accuracy, str(project.WEIGHTS_PATH) + '/%03d.pt' % epoch)
-    # except KeyboardInterrupt as ke:
-        # print('Manually interrupted execution...')
-    # except:
-        # traceback.print_exc()
-    # finally:
-        # # TODO: Shouldn't this be saved to most recent epoch
-        # print('Saving model in its current state')
-        # network.save_model(str(project.WEIGHTS_PATH) + '/%03d.pt' % epoch, 0)
-        # ep, val = zip(*train_losses)
-        # pt_util.plot(ep, val, 'Train loss', 'Epoch', 'Error')
-        # ep, val = zip(*test_losses)
-        # pt_util.plot(ep, val, 'Test loss', 'Epoch', 'Error')
-        # ep, val = zip(*test_accuracies)
-        # pt_util.plot(ep, val, 'Test accuracy', 'Epoch', 'Error')
 
