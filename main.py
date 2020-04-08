@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 import argparse
 from io import BytesIO
 from matplotlib import pyplot as plt
@@ -19,7 +20,7 @@ def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='<~Style Transfer!~>')
     parser.add_argument('--iterations', type=int, default=2000)
     parser.add_argument('--lr', type=float, default=0.003)
-    parser.add_argument('--print_interval', type=int, default=400)
+    parser.add_argument('--print_interval', type=int, default=10)
     return parser.parse_args()
 
 
@@ -211,8 +212,6 @@ def main():
     ax1.imshow(to_ndarray(content_img))
     ax2.imshow(to_ndarray(target_img))
     fig.savefig(str(paths.IMAGES_PATH) + '/final.png')
-
-
 
 
 if __name__ == '__main__':
