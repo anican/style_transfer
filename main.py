@@ -144,7 +144,7 @@ def main():
     use_cuda = torch.cuda.is_available()
     device = torch.device('cuda' if use_cuda else 'cpu')
     print('Using Device:', device)
-    # model.to(device)
+    model.to(device)
 
     content_path = "https://pbs.twimg.com/profile_images/1228153568688918529/au9ifIiK_400x400.jpg"
     content_img, content_shape = load_image(content_path)
