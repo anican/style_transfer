@@ -16,7 +16,7 @@ import traceback
 from utils import pt_util
 
 
-def get_args() -> argparse.Namespace:
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='<~Style Transfer!~>')
     parser.add_argument('--iterations', type=int, default=2000)
     parser.add_argument('--lr', type=float, default=0.003)
@@ -40,7 +40,7 @@ def load_model() -> nn.Module:
     return vgg19
 
 
-def load_image(img_path, max_size=400, shape=None) -> torch.Tensor:
+def load_image(img_path, max_size=400, shape=None):
     """
     Converts an image at the specified path to a torch.Tensor object
 
@@ -79,7 +79,7 @@ def load_image(img_path, max_size=400, shape=None) -> torch.Tensor:
     return tensor_img, tensor_img.size()[2:]
 
 
-def to_ndarray(tensor: torch.Tensor) -> np.ndarray:
+def to_ndarray(tensor) -> np.ndarray:
     """
     Convert a torch.Tensor object into an np.ndarray object
 
@@ -100,7 +100,7 @@ def to_ndarray(tensor: torch.Tensor) -> np.ndarray:
     return array
 
 
-def get_features(model: nn.Module, tensor_img: torch.Tensor) -> dict:
+def get_features(model: nn.Module, tensor_img) -> dict:
     layers = {
         '0': 'conv1_1',
         '5': 'conv2_1',
@@ -118,7 +118,7 @@ def get_features(model: nn.Module, tensor_img: torch.Tensor) -> dict:
     return features
 
 
-def get_gramian(tensor: torch.Tensor) -> torch.Tensor:
+def get_gramian(tensor):
     """
     <description>
 
@@ -135,7 +135,8 @@ def get_gramian(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def main():
-    args = get_args()
+    args = parse_args()
+    print(args)
     model = load_model()
     paths = ProjectPaths()
     print('VGG19:\n', model)
