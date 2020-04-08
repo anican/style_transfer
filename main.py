@@ -110,9 +110,9 @@ def get_features(model: nn.Module, tensor_img: torch.Tensor) -> dict:
         '28': 'conv5_1'
     }
     features = {}
-    x = tensor_img
+    x = tensor_img.cuda() if torch.cuda.is_available() else tensor_img
     for name, layer in model._modules.items():
-        x = layer(x)
+        x = layer(x).cuda() if torch.cuda.is_available() else layer(x)
         if name in layers:
             features[layers[name]] = x
     return features
